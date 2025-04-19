@@ -2,12 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Use your project's icon if you have one -->
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React + TS</title>
+    <title>Chess Analysis Tool</title>
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- **** Load the engine wrapper script BEFORE the main app **** -->
+    <script src="/loadEngine.js"></script>
+    <!-- **** ----------------------------------------------- **** -->
+
+    <!-- Load the main React application -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+
