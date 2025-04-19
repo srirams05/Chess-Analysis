@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { Chess, Move, Square, PieceSymbol } from 'chess.js';
 import ChessboardComponent from './components/ChessboardComponent';
 import { Key, Dests, Color as CgColor } from 'chessground/types';
+import { Tab, Tabs, TabList, TabPanel } from 'react-tabs';
+import 'react-tabs/style/react-tabs.css'; // Import default CSS
 import './App.css'; // Ensure CSS is imported
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
@@ -59,6 +61,9 @@ function App() {
   const [isEngineReady, setIsEngineReady] = useState(false);
   const [engineAnalysis, setEngineAnalysis] = useState<AnalysisLine | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // **** START: Add Tab State ****
+  const [activeTabIndex, setActiveTabIndex] = useState<number>(0); // 0 for Analysis, 1 for History
+  // **** END: Add Tab State ****
   const engineRef = useRef<any>(null);
   const game = useRef(new Chess());
 
@@ -200,6 +205,7 @@ function App() {
     } else { if (legalDests.size > 0) { setLegalDests(new Map()); } }
   }, [fen, isViewingLatest, history.length, legalDests]);
 
+  
 
   // --- Action Handlers ---
 
@@ -256,6 +262,38 @@ function App() {
   const handleGoBack = () => { if (currentPly > 0) updateBoardToPly(currentPly - 1); };
   const handleGoForward = () => { if (currentPly < history.length) updateBoardToPly(currentPly + 1); };
 
+    // **** START: Insert Effect 5 HERE ****
+  // --- Effect 5: Handle Keyboard Navigation for History Tab ---
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      // Ignore if typing in the input field
+      if (event.target instanceof HTMLInputElement && event.target.type === 'text') {
+        return;
+      }
+      // Check if the History tab is active (index 1)
+      if (activeTabIndex === 1) {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault(); // Prevent default tab navigation
+          handleGoBack(); // Call already defined handler
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault(); // Prevent default tab navigation
+          handleGoForward(); // Call already defined handler
+        }
+      }
+    };
+    console.log("Attaching history key listener. Active Tab:", activeTabIndex);
+    window.addEventListener('keydown', handleKeyDown);
+    // Cleanup function
+    return () => {
+      console.log("Removing history key listener. Active Tab:", activeTabIndex);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  // Dependencies: runs when tab changes or handlers potentially change identity
+  }, [activeTabIndex, handleGoBack, handleGoForward]);
+  // **** END: Insert Effect 5 HERE ****
+
+
+
 
   // **** JSX Return Statement ****
   return (
@@ -289,37 +327,66 @@ function App() {
               <button onClick={handleGoForward} disabled={isViewingLatest}>{'>'}</button>
           </div>
         </div>
+        {/* === START: Right Column JSX === */}
         <div className="right-column">
-           <div className="engine-analysis-section">
-              <h3>Engine Analysis</h3>
-              <div className="engine-controls">
-                  <button onClick={startAnalysis} disabled={!isEngineReady || isAnalyzing}>
-                      {isAnalyzing ? 'Analyzing...' : 'Analyze'}
-                  </button>
-                  <button onClick={stopAnalysis} disabled={!isEngineReady || !isAnalyzing}>
-                      Stop
-                  </button>
-                  {!isEngineReady && <span> (Engine loading...)</span>}
+          <Tabs selectedIndex={activeTabIndex} onSelect={index => setActiveTabIndex(index)}>
+            <TabList>
+              <Tab>Analysis</Tab>
+              <Tab>History</Tab>
+              {/* Add more Tabs later if needed (e.g., Openings, Static) */}
+            </TabList>
+
+            {/* --- Analysis Tab Panel --- */}
+            <TabPanel>
+              <div className="tab-content-wrapper"> {/* Optional wrapper for consistent padding */}
+                {/* --- Engine Analysis Section (Moved Inside TabPanel) --- */}
+                 <div className="engine-analysis-section">
+                    <h3>Engine Analysis</h3>
+                    <div className="engine-controls">
+                        <button onClick={startAnalysis} disabled={!isEngineReady || isAnalyzing}>
+                            {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+                        </button>
+                        <button onClick={stopAnalysis} disabled={!isEngineReady || !isAnalyzing}>
+                            Stop
+                        </button>
+                        {!isEngineReady && <span> (Engine loading...)</span>}
+                    </div>
+                    <div className="engine-output">
+                        {isAnalyzing && !engineAnalysis && <p>Thinking...</p> }
+                        {engineAnalysis ? (
+                            <div>
+                                <p> Depth: {engineAnalysis.depth} | Score: {engineAnalysis.mate ? `Mate in ${Math.abs(engineAnalysis.mate)} (${engineAnalysis.mate > 0 ? 'W' : 'B'})` : (engineAnalysis.score / 100).toFixed(2)} </p>
+                                <p className="engine-pv">PV: {engineAnalysis.pv}</p>
+                            </div>
+                        ) : ( !isAnalyzing && <p>{isEngineReady ? 'Click Analyze to start.' : 'Waiting for engine...'}</p> )}
+                    </div>
+                </div>
+                {/* --- END: Engine Analysis Section --- */}
               </div>
-              <div className="engine-output">
-                  {isAnalyzing && !engineAnalysis && <p>Thinking...</p> }
-                  {engineAnalysis ? (
-                      <div>
-                          <p> Depth: {engineAnalysis.depth} | Score: {engineAnalysis.mate ? `Mate in ${Math.abs(engineAnalysis.mate)} (${engineAnalysis.mate > 0 ? 'W' : 'B'})` : (engineAnalysis.score / 100).toFixed(2)} </p>
-                          <p className="engine-pv">PV: {engineAnalysis.pv}</p>
-                      </div>
-                  ) : ( !isAnalyzing && <p>{isEngineReady ? 'Click Analyze to start.' : 'Waiting for engine...'}</p> )}
-              </div>
-          </div>
-          <div className="history-list">
-              {history.map((move, index) => (
-                  <span key={`${index}-${move.san}`} className={`move-item ${index === currentPly - 1 ? 'current-move' : ''}`} onClick={() => updateBoardToPly(index + 1)}>
-                      {move.color === 'w' ? `${Math.floor(index / 2) + 1}. ` : ''}{move.san}
-                  </span>
-              ))}
-              {history.length === 0 && <span>No moves yet.</span>}
-          </div>
+            </TabPanel>
+
+            {/* --- History Tab Panel --- */}
+            <TabPanel>
+               <div className="tab-content-wrapper"> {/* Optional wrapper */}
+                 {/* --- History List (Moved Inside TabPanel) --- */}
+                 {/* Removed H2 title */}
+                  <div className="history-list">
+                      {history.map((move, index) => (
+                          <span key={`${index}-${move.san}`} className={`move-item ${index === currentPly - 1 ? 'current-move' : ''}`} onClick={() => updateBoardToPly(index + 1)}>
+                              {move.color === 'w' ? `${Math.floor(index / 2) + 1}. ` : ''}{move.san}
+                          </span>
+                      ))}
+                      {history.length === 0 && <span>No moves yet.</span>}
+                  </div>
+                 {/* --- END: History List --- */}
+               </div>
+            </TabPanel>
+
+             {/* Add more TabPanels here later */}
+
+          </Tabs>
         </div>
+        {/* === END: Right Column JSX === */}
       </div>
     </div>
   );

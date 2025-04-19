@@ -4,6 +4,25 @@ This document summarizes the current state and features of the web-based chess a
 
 **Project Goal:** To create a web-based chess analysis tool inspired by PeshkaChess, running entirely in the browser using React, `react-chessground`, `chess.js`, and Stockfish.
 
+**File Structure:**
+
+```markdown
+. 📂 public
+├── 📄 loadEngine.js
+├── 📄 stockfish-17-lite-single.js
+├── 📄 stockfish-17-lite-single.wasm
+```
+
+```markdown
+. 📂 src
+├── 📄 App.css
+├── 📄 App.tsx
+└── 📂 components/
+│  ├── 📄 ChessboardComponent.tsx
+├── 📄 main.tsx
+└── 📄 vite-env.d.ts
+```
+
 **Current Feature Set:**
 
 **I. Core Chess Board & Logic:**
