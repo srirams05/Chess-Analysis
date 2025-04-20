@@ -1,17 +1,19 @@
-import { useState, useRef, useEffect, KeyboardEvent } from 'react';
+// --- START App.tsx (Baseline + Multi-PV + Effect 2/Handler Fixes) ---
+
+import { useState, useRef, useEffect, KeyboardEvent, useCallback } from 'react';
 import { Chess, Move, Square, PieceSymbol } from 'chess.js';
 import ChessboardComponent from './components/ChessboardComponent';
 import { Key, Dests, Color as CgColor } from 'chessground/types';
 import { Tab, Tabs, TabList, TabPanel } from 'react-tabs';
-import 'react-tabs/style/react-tabs.css'; // Import default CSS
-import './App.css'; // Ensure CSS is imported
+import 'react-tabs/style/react-tabs.css';
+import './App.css';
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-// --- Engine Files ---
-const STOCKFISH_WORKER_PATH = '/stockfish-17-lite-single.js'; // Path for loadEngine to use
+const STOCKFISH_WORKER_PATH = '/stockfish-17-lite-single.js';
+const MULTI_PV_COUNT = 5; // For Multi-PV
 
 // ==================================
-// Helper Functions (Defined ONCE)
+// Helper Functions (Original Implementation)
 // ==================================
 const allMovesToDests = (moves: Move[]): Dests => {
   const dests = new Map<Key, Key[]>();
@@ -40,30 +42,31 @@ function cleanPgnForMoveIteration(pgn: string): string {
   return cleaned;
 }
 
-// Engine Analysis Line Interface
-interface AnalysisLine { pv: string; score: number; mate?: number; depth: number; }
+// Engine Analysis Line Interface (with multipv)
+interface AnalysisLine {
+  multipv: number; pv: string; score: number; mate?: number; depth: number;
+}
 
 // Declare loadEngine globally
 declare global { interface Window { loadEngine: (workerPath: string, options?: any) => any; } }
-
 
 // ==================================
 // App Component
 // ==================================
 function App() {
+  // console.log("--- App Render ---"); // Keep commented unless debugging renders
+
   // --- State ---
   const [fen, setFen] = useState<string>(START_FEN);
   const [history, setHistory] = useState<Move[]>([]);
   const [currentPly, setCurrentPly] = useState<number>(0);
   const [legalDests, setLegalDests] = useState<Dests>(new Map());
-  const [inputValue, setInputValue] = useState<string>(START_FEN);
+  const [inputValue, setInputValue] = useState<string>(START_FEN); // Initialize with START_FEN
   const [initialFen, setInitialFen] = useState<string>(START_FEN);
   const [isEngineReady, setIsEngineReady] = useState(false);
-  const [engineAnalysis, setEngineAnalysis] = useState<AnalysisLine | null>(null);
+  const [pvLines, setPvLines] = useState<AnalysisLine[]>([]); // State for multi-PV lines
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  // **** START: Add Tab State ****
-  const [activeTabIndex, setActiveTabIndex] = useState<number>(0); // 0 for Analysis, 1 for History
-  // **** END: Add Tab State ****
+  const [activeTabIndex, setActiveTabIndex] = useState<number>(0);
   const engineRef = useRef<any>(null);
   const game = useRef(new Chess());
 
@@ -76,7 +79,44 @@ function App() {
 
   // --- Effects & Handlers ---
 
-   // --- Handler for parsing single UCI lines (for stream callback) ---
+  // Helper to send commands (useCallback for stability)
+   const sendUciCommand = useCallback((command: string, finalCallback?: (output: string) => void, streamCallback?: (line: string) => void) => {
+       if (engineRef.current?.send) {
+            // console.log('[App] >> Engine UCI:', command);
+            engineRef.current.send(command, finalCallback, streamCallback);
+       } else { console.warn("[App] Cannot send command: Engine ref missing/no 'send'."); }
+   }, []);
+
+   // Handler for FINAL callback of 'go' command (non-memoized)
+   const handleGoResponse = (output: string) => {
+        console.log("[App] 'go' command FINISHED callback received.");
+        if (output) {
+             const lines = output.split('\n');
+             lines.forEach(line => parseUciLine(line)); // Process any trailing lines
+        }
+        // Check state just in case bestmove wasn't processed correctly
+        if (isAnalyzing) {
+            console.warn("[App] Go finished, but isAnalyzing still true? Forcing state.");
+            setIsAnalyzing(false);
+        }
+   };
+
+   // Function called by parseUciLine when 'readyok' is received (non-memoized)
+   // Sets MultiPV option
+   const handleReadyOk = () => {
+       if (!isEngineReady) {
+            setIsEngineReady(true);
+            console.log("[App] Engine is ready!");
+            if (engineRef.current) {
+                sendUciCommand(`setoption name Use NNUE value true`);
+                sendUciCommand(`setoption name MultiPV value ${MULTI_PV_COUNT}`); // Set MultiPV preference
+                sendUciCommand(`position fen ${fen}`); // Send initial position
+            }
+       }
+   };
+
+   // Handler for parsing single UCI lines (non-memoized)
+   // Handles readyok, bestmove, and info lines for MultiPV display
    const parseUciLine = (line: string) => {
         if (!line) return;
         const trimmedLine = line.trim();
@@ -84,106 +124,129 @@ function App() {
 
         // console.log("[App] Parsing line:", trimmedLine); // Verbose
 
-        if (trimmedLine === 'readyok') { console.log('[App] Received readyok.'); handleReadyOk(); return; }
-        if (trimmedLine.startsWith('bestmove')) { console.log("[App] Bestmove:", trimmedLine.split(' ')[1]); setIsAnalyzing(false); return; } // Exit on bestmove
+        if (trimmedLine === 'readyok') {
+            console.log('[App] Received readyok.');
+            handleReadyOk();
+            return;
+        }
+        if (trimmedLine.startsWith('bestmove')) {
+            console.log("[App] Bestmove received:", trimmedLine.split(' ')[1]);
+            // No need to clear pvLines here - keep last result visible
+            setIsAnalyzing(false); // Stop analysis state
+            return;
+        }
 
         const parts = trimmedLine.split(' ');
-        if (trimmedLine.startsWith('info') && parts.includes('score')) {
+        // Process 'info' lines with score and multipv
+        if (trimmedLine.startsWith('info') && parts.includes('score') && parts.includes('multipv')) {
             let scoreCp: number | undefined; let mateIn: number | undefined;
             const scoreIndex = parts.indexOf('score');
             if (scoreIndex > -1 && parts[scoreIndex + 1] === 'cp') { scoreCp = parseInt(parts[scoreIndex + 2], 10); }
             else if (scoreIndex > -1 && parts[scoreIndex + 1] === 'mate') { mateIn = parseInt(parts[scoreIndex + 2], 10); }
-            const currentTurn = game.current.turn();
-            if (scoreCp !== undefined && currentTurn === 'b') { scoreCp *= -1; }
-            if (mateIn !== undefined && currentTurn === 'b') { mateIn *= -1; }
+
+            // Adjust score perspective based on whose turn it is in the FEN
+            const turnInFen = fen.split(' ')[1];
+            if (turnInFen === 'b') {
+                if (scoreCp !== undefined) scoreCp *= -1;
+                if (mateIn !== undefined) mateIn *= -1;
+            }
+
             const depthIndex = parts.indexOf('depth');
             const depth = depthIndex > -1 ? parseInt(parts[depthIndex + 1], 10) : 0;
             const pvIndex = parts.indexOf('pv');
-            const pv = pvIndex > -1 ? parts.slice(pvIndex + 1).join(' ') : '';
-            // Update state immediately if depth is meaningful
-            if (depth > 0) {
-                setEngineAnalysis({ pv: pv, score: scoreCp ?? (mateIn ? (mateIn > 0 ? 9999 : -9999) : 0), mate: mateIn, depth: depth });
+            const pv = pvIndex > -1 ? parts.slice(pvIndex + 1).join(' ') : ''; // UCI PV
+            const multipvIndex = parts.indexOf('multipv');
+            const multipv = multipvIndex > -1 ? parseInt(parts[multipvIndex + 1], 10) : null;
+
+            if (depth > 0 && pv && multipv !== null) {
+                const newLine: AnalysisLine = {
+                    multipv, pv, // UCI PV for now
+                    score: scoreCp ?? (mateIn ? (mateIn > 0 ? 9999 : -9999) : 0),
+                    mate: mateIn, depth
+                };
+                // Update pvLines state immutably
+                setPvLines(prevLines => {
+                    const linesMap = new Map<number, AnalysisLine>();
+                    prevLines.forEach(line => linesMap.set(line.multipv, line));
+                    linesMap.set(newLine.multipv, newLine);
+                    const updatedLines = Array.from(linesMap.values())
+                        .sort((a, b) => a.multipv - b.multipv)
+                        .slice(0, MULTI_PV_COUNT);
+                    return updatedLines;
+                });
             }
         }
-    };
-
-   // --- Handler for FINAL callback of 'go' command ---
-   const handleGoResponse = (output: string) => {
-        console.log("[App] 'go' command FINISHED callback received.");
-        // Parse the final block of output to catch the last info/bestmove
-        if (output) {
-            parseUciLine(output); // Use line parser, handles bestmove inside
-        }
-        // Ensure analysis stops if bestmove wasn't in the very last line parsed
-        if (isAnalyzing) {
-            console.warn("[App] Go finished, but 'bestmove' wasn't the last line? Forcing analysis stop.");
-            setIsAnalyzing(false);
-        }
-   };
+    }; // End parseUciLine
 
 
-   // Helper to send commands
-   const sendUciCommand = (command: string, finalCallback?: (output: string) => void, streamCallback?: (line: string) => void) => {
-       if (engineRef.current?.send) {
-            console.log('[App] >> Engine UCI:', command);
-            engineRef.current.send(command, finalCallback, streamCallback);
-       } else { console.warn("[App] Cannot send command: Engine ref missing/no 'send'."); }
-   };
+  // Functions to control analysis (Manual Trigger - Not using useCallback now)
+  const startAnalysis = () => {
+      if (engineRef.current && isEngineReady && !isAnalyzing && isViewingLatest) {
+          console.log('[App] Starting Analysis (go infinite)...');
+          setPvLines([]); // Clear previous lines
+          setIsAnalyzing(true); // Set state
+          sendUciCommand(`position fen ${fen}`); // Ensure position is current
 
-  // Function to run after receiving 'readyok'
-   const handleReadyOk = () => {
-       if (!isEngineReady) {
-            setIsEngineReady(true);
-            console.log("[App] Engine is ready!");
-            if (engineRef.current) {
-                sendUciCommand(`setoption name Use NNUE value true`);
-                sendUciCommand(`position fen ${fen}`);
-            }
-       }
-   };
+          // Wrapper for stream logging if needed
+          const streamCallbackWrapper = (line: string) => {
+              // console.log("[Stream Callback Raw]:", line); // Uncomment for deep debug
+              parseUciLine(line);
+          };
+          sendUciCommand('go infinite', handleGoResponse, streamCallbackWrapper);
+      } else {
+          console.warn(`[App] startAnalysis conditions not met: engineReady=${isEngineReady}, analyzing=${isAnalyzing}, viewingLatest=${isViewingLatest}`);
+      }
+  };
+  const stopAnalysis = () => {
+      if (engineRef.current && isEngineReady && isAnalyzing) {
+          console.log('[App] stopAnalysis: Sending "stop"...');
+          sendUciCommand('stop'); // Engine responds with bestmove -> parseUciLine sets isAnalyzing=false
+          // Force UI update immediately for responsiveness
+          setIsAnalyzing(false);
+          console.log('[App] stopAnalysis: Manually set isAnalyzing to false.');
+      }
+  };
 
 
   // Effect 1: Initialize loadEngine.js and Stockfish
   useEffect(() => {
       let engine: any = null;
-
       const init = () => {
-          console.log("Checking for loadEngine function...");
           if (typeof window.loadEngine === 'function') {
-              console.log("Calling window.loadEngine()...");
               try {
                   engine = window.loadEngine(STOCKFISH_WORKER_PATH);
                   engineRef.current = engine;
-                  console.log("Setting up response handling via callbacks...");
                   if (typeof engine.send === 'function') {
-                      sendUciCommand('uci'); // Send uci, don't need callback
-                      // Send 'isready', use parseUciLine for the callback output
-                      sendUciCommand('isready', parseUciLine);
-                  } else { console.error("Engine object missing 'send' method."); setIsEngineReady(false); }
-              } catch (err) { console.error("Error calling loadEngine:", err); alert(`Init Error: ${err instanceof Error ? err.message : String(err)}`); setIsEngineReady(false); }
-          } else { console.error("loadEngine fn not found."); alert("loadEngine.js failed"); setIsEngineReady(false); }
+                      sendUciCommand('uci'); sendUciCommand('isready', parseUciLine);
+                  } else { console.error("Engine has no send method."); setIsEngineReady(false); }
+              } catch (err) { console.error("loadEngine error:", err); setIsEngineReady(false); }
+          } else { console.error("loadEngine not found."); setIsEngineReady(false); }
       };
-      const timerId = setTimeout(init, 150); // Delay init slightly
-      // Cleanup function
+      const timerId = setTimeout(init, 150);
       return () => {
           clearTimeout(timerId); console.log("Terminating Engine...");
+          // Call non-memoized stopAnalysis directly if needed
+          if (engineRef.current && isAnalyzing) {
+               console.log("[Effect 1 Cleanup] Calling stopAnalysis.");
+               stopAnalysis();
+          }
           const engineToClean = engineRef.current;
-          // No listener removal needed
-          if (engineToClean?.quit) { engineToClean.quit(); }
-          engineRef.current = null; setIsEngineReady(false); setIsAnalyzing(false);
+          if (engineToClean?.quit) engineToClean.quit();
+          engineRef.current = null; setIsEngineReady(false); setIsAnalyzing(false); setPvLines([]);
       };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Run only once
 
 
-  // Effect 2: Send FEN to engine when board changes
+  // Effect 2: Send FEN to engine when board position changes
+  // *** SIMPLIFIED: Only sends position, does NOT stop analysis ***
    useEffect(() => {
       if (isEngineReady && engineRef.current && fen) {
+          console.log(`[Effect 2 Simplified] FEN (${fen}) or Engine Ready (${isEngineReady}) changed. Sending position.`);
           sendUciCommand(`position fen ${fen}`);
-          if (isAnalyzing) { stopAnalysis(); console.log("[App] Pos changed, stopping analysis."); setEngineAnalysis(null); }
+          // Stop logic is now handled EXCLUSIVELY by the action handlers before FEN changes
       }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fen, isEngineReady]);
+   }, [fen, isEngineReady, sendUciCommand]); // Dependencies trigger only on position/readiness change
 
 
   // Effect 3: Synchronize the main `game` ref instance
@@ -194,54 +257,87 @@ function App() {
 
 
   // Effect 4: Update legal destinations and the input field value
-  useEffect(() => {
-    if (fen !== inputValue) { setInputValue(fen); }
-    if (isViewingLatest) {
-       if (game.current.fen() === fen) {
-          const moves = game.current.moves({ verbose: true });
-          const newDests = allMovesToDests(moves);
-          if (JSON.stringify(Array.from(newDests.entries())) !== JSON.stringify(Array.from(legalDests.entries()))) { setLegalDests(newDests); }
-       } else { if (legalDests.size > 0) setLegalDests(new Map()); }
-    } else { if (legalDests.size > 0) { setLegalDests(new Map()); } }
-  }, [fen, isViewingLatest, history.length, legalDests]);
+  // *** Input sync restored, simplified dependencies ***
+    // Effect 4: Update legal destinations ONLY
 
+    // Effect 4: Update legal destinations AND Sync input display value FROM FEN state
+    useEffect(() => {
+      // console.log("[Effect 4] Running. Fen:", fen, "ViewingLatest:", isViewingLatest);
   
+      // *** RESTORED: Sync input value FROM fen state ***
+      // This updates the input display when FEN changes due to moves/loads
+      if (fen !== inputValue) {
+          // console.log("[Effect 4] Syncing input value from FEN state.");
+          setInputValue(fen);
+      }
+  
+      // Update legal moves based on game state
+      if (isViewingLatest) {
+         if (game.current.fen() === fen) { // Check sync
+            const moves = game.current.moves({ verbose: true });
+            const newDests = allMovesToDests(moves);
+            // Avoid re-render if possible
+            const currentDestsJSON = JSON.stringify(Array.from(legalDests.entries()));
+            const newDestsJSON = JSON.stringify(Array.from(newDests.entries()));
+            if (newDestsJSON !== currentDestsJSON) {
+                 setLegalDests(newDests);
+            }
+         } else {
+             if (legalDests.size > 0) setLegalDests(new Map()); // Clear if not synced
+         }
+      } else {
+          if (legalDests.size > 0) setLegalDests(new Map()); // Clear if navigating
+      }
+    // *** CORRECTED DEPENDENCIES: Only trigger on FEN/view changes, NOT input/dests changes ***
+    }, [fen, isViewingLatest, history.length]); // Removed legalDests, inputValue
 
-  // --- Action Handlers ---
+  // Effect 5: Handle Keyboard Navigation for History Tab
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement && event.target.type === 'text') return;
+      if (activeTabIndex === 1) { // Check tab inside handler
+        if (event.key === 'ArrowLeft') { event.preventDefault(); handleGoBack(); }
+        else if (event.key === 'ArrowRight') { event.preventDefault(); handleGoForward(); }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTabIndex]); // Depends only on activeTabIndex
+
+
+  // --- Action Handlers (Ensure stopAnalysis is called correctly) ---
 
   // Function to update display board FEN for navigation
   const updateBoardToPly = (ply: number) => {
     if (ply === currentPly) return; if (ply < 0 || ply > history.length) return;
-    const tempGame = new Chess(); try { tempGame.load(initialFen); } catch(e) { tempGame.load(START_FEN); }
+    // *** Stop analysis BEFORE changing state ***
+    if (isAnalyzing) {
+        console.log("[updateBoardToPly] Calling stopAnalysis.");
+        stopAnalysis();
+    }
+    const tempGame = new Chess();
+    try { tempGame.load(initialFen); } catch(e) { tempGame.load(START_FEN); }
     for (let i = 0; i < ply; i++) { if (history[i] && !tempGame.move(history[i].san)) { return; } }
-    const targetFen = tempGame.fen(); setFen(targetFen); setCurrentPly(ply);
+    const targetFen = tempGame.fen();
+    setFen(targetFen); // Update displayed FEN
+    setCurrentPly(ply); // Update ply number
   };
-
-  // Functions to control analysis (Use stream callback)
-  const startAnalysis = () => {
-      if (engineRef.current && isEngineReady && !isAnalyzing) {
-          setEngineAnalysis(null); setIsAnalyzing(true);
-          console.log('[App] Sending "go infinite"...');
-          // Pass parseUciLine as the STREAM callback (3rd arg)
-          // Pass handleGoResponse as the FINAL callback (2nd arg)
-          sendUciCommand('go infinite', handleGoResponse, parseUciLine);
-      }
-  };
-  const stopAnalysis = () => {
-      if (engineRef.current && isEngineReady && isAnalyzing) {
-          console.log('[App] Sending "stop"...');
-          sendUciCommand('stop'); // Output handled by callbacks passed to 'go'
-      }
-  };
-
 
   // Input Handling and Loading Logic
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => { setInputValue(event.target.value); };
   const loadFenOrPgn = (input: string) => {
-     const trimmedInput = input.trim(); if (!trimmedInput) return; const comparisonFen = isViewingLatest ? game.current.fen() : fen; if (trimmedInput === comparisonFen) return;
+     const trimmedInput = input.trim(); if (!trimmedInput) return;
+     const comparisonFen = isViewingLatest ? game.current.fen() : fen;
+     if (trimmedInput === comparisonFen) return;
+     // *** Stop analysis BEFORE attempting load ***
+     if (isAnalyzing) {
+         console.log("[loadFenOrPgn] Calling stopAnalysis.");
+         stopAnalysis();
+     }
      let loadedFen = false; let loadedPgn = false; const looksLikeFen = trimmedInput.split('/').length > 4 && trimmedInput.split(' ').length >= 4 && !trimmedInput.includes('['); const looksLikePgn = trimmedInput.includes('.') || trimmedInput.includes('[');
-     if (looksLikePgn) { try { const startingFen = extractFenFromPgnHeaders(trimmedInput) || START_FEN; const cleanedMoves = cleanPgnForMoveIteration(trimmedInput); if (cleanedMoves) { const movesArray = cleanedMoves.split(' '); const tempGamePgn = new Chess(); tempGamePgn.load(startingFen); if (tempGamePgn.fen() !== startingFen && startingFen !== START_FEN) throw new Error(`Invalid start FEN`); let pgnLoadError = null; let successfullyAppliedMoves: string[] = []; for (let i=0; i < movesArray.length; i++) { const sanMove = movesArray[i]; if (!sanMove) continue; const moveResult = tempGamePgn.move(sanMove, { sloppy: true } as any); if (!moveResult) { pgnLoadError = `Invalid move ${i+1}`; break; } else { successfullyAppliedMoves.push(moveResult.san); } } if (!pgnLoadError && (successfullyAppliedMoves.length > 0 || startingFen !== START_FEN)) { game.current.load(startingFen); successfullyAppliedMoves.forEach(san => { game.current.move(san); }); loadedPgn = true; const newHistoryState = game.current.history({ verbose: true }) as Move[]; setInitialFen(startingFen); setHistory(newHistoryState); setCurrentPly(newHistoryState.length); setFen(game.current.fen()); return; } else if (!pgnLoadError) console.log("PGN iter 0 moves."); else console.error(pgnLoadError); } else { console.log("No moves after clean."); } } catch (e) { console.log("PGN iter fail:", e); } }
-     if (!loadedPgn && (looksLikeFen || !looksLikePgn)) { try { const testGameFen = new Chess(); testGameFen.load(trimmedInput); const fenAfterLoad = testGameFen.fen(); if (fenAfterLoad !== game.current.fen()) { try { game.current.load(trimmedInput); if (game.current.fen() === fenAfterLoad) { loadedFen = true; setInitialFen(game.current.fen()); setHistory([]); setCurrentPly(0); setFen(game.current.fen()); return; } else { game.current.load(fen); } } catch (mainLoadError) {} } else {} } catch (e) {} }
+     // ... (rest of PGN/FEN loading logic - assuming it was correct in baseline) ...
+     if (looksLikePgn) { try { const startingFen = extractFenFromPgnHeaders(trimmedInput) || START_FEN; const cleanedMoves = cleanPgnForMoveIteration(trimmedInput); if (cleanedMoves || startingFen !== START_FEN) { const movesArray = cleanedMoves ? cleanedMoves.split(' ') : []; const tempGamePgn = new Chess(); try { tempGamePgn.load(startingFen); } catch(e){ throw new Error("Invalid Start FEN")} let pgnLoadError = null; let successfullyAppliedMoves: string[] = []; for (let i=0; i < movesArray.length; i++) { const sanMove = movesArray[i]; if (!sanMove) continue; const moveResult = tempGamePgn.move(sanMove, { sloppy: true } as any); if (!moveResult) { pgnLoadError = `Invalid move ${i+1}: ${sanMove}`; break; } else { successfullyAppliedMoves.push(moveResult.san); } } if (!pgnLoadError) { game.current.load(startingFen); successfullyAppliedMoves.forEach(san => { game.current.move(san); }); loadedPgn = true; const newHistoryState = game.current.history({ verbose: true }) as Move[]; setInitialFen(startingFen); setHistory(newHistoryState); setCurrentPly(newHistoryState.length); setFen(game.current.fen()); return; } else { console.error(pgnLoadError); } } else { console.log("No moves after clean."); } } catch (e) { console.log("PGN loading error:", e); } }
+     if (!loadedPgn && (looksLikeFen || !looksLikePgn)) { try { new Chess(trimmedInput); game.current.load(trimmedInput); loadedFen = true; setInitialFen(game.current.fen()); setHistory([]); setCurrentPly(0); setFen(game.current.fen()); return; } catch (e) { console.log("FEN loading error:", e); } }
      if (!loadedFen && !loadedPgn) { alert("Invalid FEN/PGN"); setInputValue(fen); }
   };
   const handleInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') loadFenOrPgn(inputValue); };
@@ -249,12 +345,19 @@ function App() {
   // Handle making a move on the board
   const handleMove = (from: Key, to: Key) => {
     if (!isViewingLatest) return;
+    // *** Stop analysis BEFORE attempting move ***
+    if (isAnalyzing) {
+        console.log("[handleMove] Calling stopAnalysis.");
+        stopAnalysis();
+    }
     const moveInput = { from: from as Square, to: to as Square, promotion: 'q' as PieceSymbol };
     let moveResult: Move | null = null;
     try {
       moveResult = game.current.move(moveInput);
-      if (moveResult) { const newHistory = game.current.history({ verbose: true }) as Move[]; setHistory(newHistory); setCurrentPly(newHistory.length); setFen(game.current.fen()); }
-      else { console.log("Illegal move (null):", from, to); }
+      if (moveResult) {
+          const newHistory = game.current.history({ verbose: true }) as Move[];
+          setHistory(newHistory); setCurrentPly(newHistory.length); setFen(game.current.fen()); // Update state AFTER move
+      } else { console.log("Illegal move (null):", from, to); }
     } catch (error) { console.error(`Error move ${from} to ${to}:`, error); setFen(game.current.fen()); }
   };
 
@@ -262,48 +365,17 @@ function App() {
   const handleGoBack = () => { if (currentPly > 0) updateBoardToPly(currentPly - 1); };
   const handleGoForward = () => { if (currentPly < history.length) updateBoardToPly(currentPly + 1); };
 
-    // **** START: Insert Effect 5 HERE ****
-  // --- Effect 5: Handle Keyboard Navigation for History Tab ---
-  useEffect(() => {
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      // Ignore if typing in the input field
-      if (event.target instanceof HTMLInputElement && event.target.type === 'text') {
-        return;
-      }
-      // Check if the History tab is active (index 1)
-      if (activeTabIndex === 1) {
-        if (event.key === 'ArrowLeft') {
-          event.preventDefault(); // Prevent default tab navigation
-          handleGoBack(); // Call already defined handler
-        } else if (event.key === 'ArrowRight') {
-          event.preventDefault(); // Prevent default tab navigation
-          handleGoForward(); // Call already defined handler
-        }
-      }
-    };
-    console.log("Attaching history key listener. Active Tab:", activeTabIndex);
-    window.addEventListener('keydown', handleKeyDown);
-    // Cleanup function
-    return () => {
-      console.log("Removing history key listener. Active Tab:", activeTabIndex);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  // Dependencies: runs when tab changes or handlers potentially change identity
-  }, [activeTabIndex, handleGoBack, handleGoForward]);
-  // **** END: Insert Effect 5 HERE ****
-
-
-
 
   // **** JSX Return Statement ****
   return (
     <div className="app-container">
       <div className="main-layout">
+        {/* Left Column */}
         <div className="left-column">
           <div className="chessboard-container">
             <ChessboardComponent
               fen={fen}
-              onMove={handleMove}
+              onMove={handleMove} // Use non-memoized handler
               turnColor={turnColor as CgColor}
               lastMove={lastMoveSquares}
               dests={legalDests}
@@ -311,15 +383,7 @@ function App() {
             />
           </div>
           <div className="fen-input-container">
-              <input
-                  type="text"
-                  className="fen-pgn-input"
-                  value={inputValue}
-                  onChange={handleInputChange}
-                  onKeyDown={handleInputKeyDown}
-                  placeholder="Enter FEN or PGN..."
-                  spellCheck="false"
-              />
+              <input type="text" className="fen-pgn-input" value={inputValue} onChange={handleInputChange} onKeyDown={handleInputKeyDown} placeholder="Enter FEN or PGN..." spellCheck="false"/>
           </div>
           <div className="navigation-buttons">
               <button onClick={handleGoBack} disabled={currentPly === 0}>{'<'}</button>
@@ -327,49 +391,54 @@ function App() {
               <button onClick={handleGoForward} disabled={isViewingLatest}>{'>'}</button>
           </div>
         </div>
-        {/* === START: Right Column JSX === */}
+        {/* Right Column */}
         <div className="right-column">
           <Tabs selectedIndex={activeTabIndex} onSelect={index => setActiveTabIndex(index)}>
             <TabList>
               <Tab>Analysis</Tab>
               <Tab>History</Tab>
-              {/* Add more Tabs later if needed (e.g., Openings, Static) */}
             </TabList>
 
-            {/* --- Analysis Tab Panel --- */}
+            {/* Analysis Panel */}
             <TabPanel>
-              <div className="tab-content-wrapper"> {/* Optional wrapper for consistent padding */}
-                {/* --- Engine Analysis Section (Moved Inside TabPanel) --- */}
+              <div className="tab-content-wrapper">
                  <div className="engine-analysis-section">
                     <h3>Engine Analysis</h3>
                     <div className="engine-controls">
-                        <button onClick={startAnalysis} disabled={!isEngineReady || isAnalyzing}>
+                        <button onClick={startAnalysis} disabled={!isEngineReady || isAnalyzing || !isViewingLatest}>
                             {isAnalyzing ? 'Analyzing...' : 'Analyze'}
                         </button>
                         <button onClick={stopAnalysis} disabled={!isEngineReady || !isAnalyzing}>
                             Stop
                         </button>
                         {!isEngineReady && <span> (Engine loading...)</span>}
+                        {!isViewingLatest && isEngineReady && <span style={{marginLeft: '10px', fontStyle: 'italic'}}>(Navigating history)</span>}
                     </div>
                     <div className="engine-output">
-                        {isAnalyzing && !engineAnalysis && <p>Thinking...</p> }
-                        {engineAnalysis ? (
-                            <div>
-                                <p> Depth: {engineAnalysis.depth} | Score: {engineAnalysis.mate ? `Mate in ${Math.abs(engineAnalysis.mate)} (${engineAnalysis.mate > 0 ? 'W' : 'B'})` : (engineAnalysis.score / 100).toFixed(2)} </p>
-                                <p className="engine-pv">PV: {engineAnalysis.pv}</p>
+                        {!isEngineReady && <span>Engine loading...</span>}
+                        {isEngineReady && isAnalyzing && pvLines.length === 0 && <p>Thinking...</p>}
+                        {isEngineReady && !isAnalyzing && pvLines.length === 0 && isViewingLatest && <p>Click Analyze to start.</p>}
+                        {isEngineReady && !isAnalyzing && pvLines.length === 0 && !isViewingLatest && <p>Analysis unavailable (viewing history).</p>}
+                        {isEngineReady && pvLines.length > 0 && (
+                            <div className="pv-lines-container">
+                                {pvLines.map((line) => (
+                                    <div key={line.multipv} className="pv-line">
+                                        <span className="pv-score">{line.mate ? `M${line.mate > 0 ? '' : '-'}${Math.abs(line.mate)}` : (line.score / 100).toFixed(2)}</span>
+                                        <span className="pv-depth">(D{line.depth})</span>
+                                        <span className="pv-text">{line.pv}</span> {/* UCI PV */}
+                                    </div>
+                                ))}
                             </div>
-                        ) : ( !isAnalyzing && <p>{isEngineReady ? 'Click Analyze to start.' : 'Waiting for engine...'}</p> )}
+                        )}
+                         {isEngineReady && !isAnalyzing && pvLines.length > 0 && <p style={{fontSize: '0.8em', color: '#666', marginTop: '5px'}}>(Analysis stopped)</p>}
                     </div>
-                </div>
-                {/* --- END: Engine Analysis Section --- */}
+                 </div>
               </div>
             </TabPanel>
 
-            {/* --- History Tab Panel --- */}
+            {/* History Panel */}
             <TabPanel>
-               <div className="tab-content-wrapper"> {/* Optional wrapper */}
-                 {/* --- History List (Moved Inside TabPanel) --- */}
-                 {/* Removed H2 title */}
+               <div className="tab-content-wrapper">
                   <div className="history-list">
                       {history.map((move, index) => (
                           <span key={`${index}-${move.san}`} className={`move-item ${index === currentPly - 1 ? 'current-move' : ''}`} onClick={() => updateBoardToPly(index + 1)}>
@@ -378,18 +447,15 @@ function App() {
                       ))}
                       {history.length === 0 && <span>No moves yet.</span>}
                   </div>
-                 {/* --- END: History List --- */}
                </div>
             </TabPanel>
-
-             {/* Add more TabPanels here later */}
-
           </Tabs>
         </div>
-        {/* === END: Right Column JSX === */}
       </div>
     </div>
   );
 }
 
 export default App;
+
+// --- END App.tsx (Baseline + Multi-PV + Effect 2/Handler Fixes) ---

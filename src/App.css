@@ -248,3 +248,56 @@ body {
  .tab-content-wrapper .engine-analysis-section {
      flex-shrink: 0;
  }
+
+ /* Add to App.css */
+.engine-output {
+  margin-top: 0.8rem;
+  font-family: monospace; /* Use monospace for alignment */
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.pv-lines-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem; /* Space between PV lines */
+  margin-top: 5px; /* Add some space above the first line */
+}
+
+.pv-line {
+  background-color: #f8f9fa; /* Light background for each line */
+  padding: 0.3rem 0.5rem; /* Adjust padding */
+  border-radius: 3px;
+  white-space: nowrap; /* Prevent PV text wrapping */
+  overflow: hidden;    /* Hide overflow */
+  text-overflow: ellipsis; /* Add ellipsis if text overflows */
+  cursor: default;
+  border: 1px solid #eee;
+  display: flex; /* Use flex for alignment within the line */
+  align-items: baseline; /* Align text nicely */
+}
+
+.pv-score {
+  display: inline-block;
+  font-weight: bold;
+  min-width: 55px; /* Ensure consistent width for score */
+  margin-right: 0.6em;
+  text-align: right;
+  flex-shrink: 0; /* Prevent score from shrinking */
+}
+
+.pv-depth {
+  display: inline-block;
+  color: #6c757d; /* Dimmer color for depth */
+  font-size: 0.85em;
+  min-width: 40px; /* Ensure consistent width for depth */
+  margin-right: 0.6em;
+  flex-shrink: 0; /* Prevent depth from shrinking */
+}
+
+.pv-text {
+ flex-grow: 1; /* Allow PV text to take remaining space */
+ overflow: hidden; /* Needed again with flex */
+ text-overflow: ellipsis; /* Needed again with flex */
+ white-space: nowrap; /* Needed again with flex */
+}
